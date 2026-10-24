@@ -24,26 +24,45 @@ def index_map(index: int) -> str:
 def generate_step_from_2d_cad_image(
     image_filepath: str,
     output_filepath: str,
-    num_refinements: int = 3,
+    num_refinements: int = 0,
     model_type: MODEL_TYPE = "gpt",
+    local_observations: str = "",
 ):
     """Generate a STEP file from a 2D CAD image
 
     Args:
         image_filepath (str): Path to the 2D CAD image
         output_filepath (str): Path to the output STEP file
+        local_observations (str): Optional user-reviewed drawing evidence. Empty
+            keeps the original generation prompt unchanged.
     """
-    only_execute = (model_type == "llama")  # llamaだとagentがうまく動かない
+    only_execute = (model_type in ("llama", "gemini"))  # llamaだとagentがうまく動かない
     image_data = ImageData.load_from_file(image_filepath)
-    chain = CadCodeGeneratorChain(model_type=model_type)
+    chain = CadCodeGeneratorChain(model_type=model_type, local_observations=local_observations)
 
-    result = chain.invoke(image_data)["result"]
+    chain_output = chain.invoke(image_data)
+    result = chain_output.get("result")
+    logger.info(f"Chain output keys: {list(chain_output.keys())}")
+    logger.info(f"Result type: {type(result).__name__}")
+    if not isinstance(result, str) or not result.strip():
+        raise RuntimeError(f"CAD code generation failed: result={result!r}; output_keys={list(chain_output.keys())}")
     code = Template(result).substitute(output_filename=output_filepath)
     logger.info("1st code generation complete. Running code...")
     logger.debug("Generated 1st code:")
     logger.debug(code)
     output = execute_python_code(code, model_type=model_type, only_execute=only_execute)
     logger.debug(output)
+    from pathlib import Path
+    step_path = Path(output_filepath)
+    if not step_path.is_file() or step_path.stat().st_size == 0:
+        raise RuntimeError(f"STEP 未產生或為空檔案。Python 執行結果：{output!r}")
+    try:
+        import cadquery as cq
+        shape = cq.importers.importStep(str(step_path))
+        if not shape.val().isValid():
+            raise ValueError("STEP 幾何形狀無效")
+    except Exception as e:
+        raise RuntimeError(f"STEP 驗證失敗：{e}；Python 執行結果：{output!r}") from e
 
     refiner_chain = CadCodeRefinerChain(model_type=model_type)
 
